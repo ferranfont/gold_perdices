@@ -148,7 +148,11 @@ class UnifiedZigzagDetector:
         # Si estamos buscando un pico (tendencia alcista)
         if self.current_trend == ZigzagDirection.UP:
             if self.current_high > self.last_pivot.price:
-                change_from_high = (self.current_high - low) / self.current_high
+                # Evitar división por cero (puede ocurrir con RSI = 0)
+                if self.current_high == 0:
+                    change_from_high = 0
+                else:
+                    change_from_high = (self.current_high - low) / self.current_high
                 if change_from_high >= self.min_change_pct:
                     pivot = ZigzagPoint(
                         self.current_high_index,
@@ -170,7 +174,11 @@ class UnifiedZigzagDetector:
         # Si estamos buscando un valle (tendencia bajista)
         elif self.current_trend == ZigzagDirection.DOWN:
             if self.current_low < self.last_pivot.price:
-                change_from_low = (high - self.current_low) / self.current_low
+                # Evitar división por cero (puede ocurrir con RSI = 0)
+                if self.current_low == 0:
+                    change_from_low = float('inf') if high > 0 else 0
+                else:
+                    change_from_low = (high - self.current_low) / self.current_low
                 if change_from_low >= self.min_change_pct:
                     pivot = ZigzagPoint(
                         self.current_low_index,

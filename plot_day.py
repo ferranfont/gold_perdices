@@ -6,7 +6,8 @@ from pathlib import Path
 from config import (
     START_DATE, END_DATE, FRACTALS_DIR,
     RSI_PERIOD, RSI_SMOOTH_PERIOD, RSI_OVERBOUGHT, RSI_OVERSOLD,
-    RSI_RESAMPLE, RSI_RESAMPLE_TO_PERIOD, MINIMUM_IMPULSE_FACTOR
+    RSI_RESAMPLE, RSI_RESAMPLE_TO_PERIOD, MINIMUM_IMPULSE_FACTOR,
+    MINOR_ZIG_ZAG_RSI, MIN_CHANGE_PCT_RSI
 )
 
 def calculate_rsi(df, period=14, smooth_period=0, resample_rule=None):
@@ -84,7 +85,53 @@ def calculate_rsi(df, period=14, smooth_period=0, resample_rule=None):
 
     return rsi_mapped
 
-def plot_range_chart(df, df_fractals_minor, df_fractals_major, start_date, end_date, rsi_levels=None, fibo_levels=None):
+def detect_rsi_fractals(df, min_change_pct=0.5):
+    """
+    Detecta fractales (picos y valles) directamente en la serie del RSI.
+
+    Args:
+        df: DataFrame con columnas 'timestamp' y 'rsi'
+        min_change_pct: Cambio mínimo en puntos de RSI para considerar un fractal (ej: 0.5 = 0.5 puntos RSI)
+
+    Returns:
+        DataFrame con fractales detectados (timestamp, rsi_value, type)
+    """
+    from find_fractals import UnifiedZigzagDetector, ZigzagDirection
+
+    # Filtrar valores válidos de RSI
+    df_valid = df[df['rsi'].notna()].copy()
+    if df_valid.empty:
+        return pd.DataFrame(columns=['timestamp', 'rsi_value', 'type'])
+
+    # Crear detector de fractales para RSI
+    # Usamos el RSI como "precio" y detectamos fractales
+    detector = UnifiedZigzagDetector(min_change_pct=min_change_pct)
+
+    fractals = []
+    for idx, row in df_valid.iterrows():
+        rsi_val = row['rsi']
+        timestamp = row['timestamp']
+
+        # Para el zigzag, usamos el RSI como high y low (mismo valor)
+        detected_point = detector.add_candle(
+            high=rsi_val,
+            low=rsi_val,
+            index=idx,
+            timestamp=timestamp
+        )
+
+        if detected_point is not None:
+            fractal_type = "PICO" if detected_point.direction == ZigzagDirection.UP else "VALLE"
+            fractals.append({
+                'timestamp': detected_point.timestamp,
+                'rsi_value': detected_point.price,
+                'type': fractal_type
+            })
+
+    df_fractals = pd.DataFrame(fractals)
+    return df_fractals
+
+def plot_range_chart(df, df_fractals_minor, df_fractals_major, start_date, end_date, rsi_levels=None, fibo_levels=None, divergences=None):
     """
     Crea un gráfico con línea de precio y fractales ZigZag para un rango de fechas.
 
@@ -96,6 +143,7 @@ def plot_range_chart(df, df_fractals_minor, df_fractals_major, start_date, end_d
         end_date: Fecha final en formato YYYY-MM-DD
         rsi_levels: dict con información de niveles RSI (opcional)
         fibo_levels: dict con información de niveles Fibonacci para TODOS los movimientos alcistas (opcional)
+        divergences: DataFrame con divergencias detectadas (opcional)
 
     Returns:
         dict con información del gráfico generado o None si hay error
@@ -202,6 +250,29 @@ def plot_range_chart(df, df_fractals_minor, df_fractals_major, start_date, end_d
                 hovertemplate='<b>VALLE Major</b><br>Time: %{x}<br>Price: %{y:.2f}<extra></extra>'
             ), row=1, col=1)
 
+    # Dibujar triángulos de divergencia (señales de entrada)
+    if divergences is not None and not divergences.empty:
+        # Filtrar solo puntos de ENTRY (el último punto de cada divergencia)
+        df_entries = divergences[divergences['tag'].str.contains('ENTRY', na=False)].copy()
+
+        if not df_entries.empty:
+            print(f"[INFO] Dibujando {len(df_entries)} señales de divergencia en el gráfico")
+
+            fig.add_trace(go.Scatter(
+                x=df_entries['price_timestamp'],
+                y=df_entries['price'],
+                mode='markers',
+                name='Divergencia ENTRY',
+                marker=dict(
+                    color='lime',
+                    size=12,
+                    symbol='triangle-up',
+                    line=dict(color='darkgreen', width=2)
+                ),
+                hovertemplate='<b>DIVERGENCIA ENTRY</b><br>Tag: %{text}<br>Time: %{x}<br>Price: %{y:.2f}<extra></extra>',
+                text=df_entries['tag']
+            ), row=1, col=1)
+
     # Añadir niveles Fibonacci para TODOS los movimientos alcistas
     if fibo_levels is not None and 'upward_moves' in fibo_levels:
         upward_moves = fibo_levels['upward_moves']
@@ -251,6 +322,106 @@ def plot_range_chart(df, df_fractals_minor, df_fractals_major, start_date, end_d
         showlegend=False
     ), row=2, col=1)
 
+    # Detectar fractales directamente en el RSI y marcarlos con puntos violeta
+    # Solo mostrar VALLES (fractal low) que están por debajo de RSI_OVERSOLD
+    df_rsi_fractals = detect_rsi_fractals(df, min_change_pct=MIN_CHANGE_PCT_RSI)
+    if not df_rsi_fractals.empty:
+        # Filtrar solo fractales VALLE por debajo de RSI_OVERSOLD
+        df_rsi_valles = df_rsi_fractals[
+            (df_rsi_fractals['type'] == 'VALLE') &
+            (df_rsi_fractals['rsi_value'] < RSI_OVERSOLD)
+        ]
+
+        # Dibujar VALLES del RSI en violeta (solo si están por debajo de OVERSOLD)
+        if not df_rsi_valles.empty:
+            fig.add_trace(go.Scatter(
+                x=df_rsi_valles['timestamp'],
+                y=df_rsi_valles['rsi_value'],
+                mode='markers',
+                name='RSI Valles <OS',
+                marker=dict(
+                    color='violet',
+                    size=8,
+                    symbol='circle'
+                ),
+                hovertemplate='<b>RSI VALLE <OS</b><br>Time: %{x}<br>RSI: %{y:.2f}<extra></extra>'
+            ), row=2, col=1)
+
+    # Dibujar triángulos de divergencia en el RSI (señales de entrada)
+    if divergences is not None and not divergences.empty:
+        # Filtrar solo puntos de ENTRY
+        df_entries = divergences[divergences['tag'].str.contains('ENTRY', na=False)].copy()
+
+        if not df_entries.empty:
+            # Para cada entrada, encontrar el valor del RSI en ese timestamp
+            rsi_entry_values = []
+            rsi_entry_timestamps = []
+
+            for idx, row in df_entries.iterrows():
+                entry_ts = pd.to_datetime(row['rsi_timestamp'])
+                rsi_val = row['rsi_value']
+
+                if pd.notna(rsi_val):
+                    rsi_entry_values.append(rsi_val)
+                    rsi_entry_timestamps.append(entry_ts)
+
+            # Dibujar triángulos en el RSI
+            if rsi_entry_timestamps:
+                fig.add_trace(go.Scatter(
+                    x=rsi_entry_timestamps,
+                    y=rsi_entry_values,
+                    mode='markers',
+                    name='Divergencia ENTRY RSI',
+                    marker=dict(
+                        color='lime',
+                        size=12,
+                        symbol='triangle-up',
+                        line=dict(color='darkgreen', width=2)
+                    ),
+                    hovertemplate='<b>DIVERGENCIA ENTRY RSI</b><br>Time: %{x}<br>RSI: %{y:.2f}<extra></extra>'
+                ), row=2, col=1)
+
+    # CÓDIGO COMENTADO - Marcar fractales VALLE de precio con RSI < RSI_OVERSOLD
+    # (No se usa actualmente, pero se mantiene por si se necesita en el futuro)
+    """
+    df_fractals_to_use = df_fractals_minor if MINOR_ZIG_ZAG_RSI else df_fractals_major
+    fractal_type_label = "MINOR" if MINOR_ZIG_ZAG_RSI else "MAJOR"
+
+    if df_fractals_to_use is not None and not df_fractals_to_use.empty:
+        df_valles_rsi = df_fractals_to_use[df_fractals_to_use['type'] == 'VALLE'].copy()
+
+        if not df_valles_rsi.empty:
+            # Para cada fractal VALLE, encontrar el valor del RSI en ese timestamp
+            rsi_values = []
+            timestamps_match = []
+
+            for idx, row in df_valles_rsi.iterrows():
+                fractal_ts = row['timestamp']
+                # Buscar el valor del RSI en el df principal para ese timestamp
+                df_match = df[df['timestamp'] == fractal_ts]
+                if not df_match.empty:
+                    rsi_val = df_match['rsi'].iloc[0]
+                    # Solo guardar si RSI < RSI_OVERSOLD
+                    if pd.notna(rsi_val) and rsi_val < RSI_OVERSOLD:
+                        rsi_values.append(rsi_val)
+                        timestamps_match.append(fractal_ts)
+
+            # Dibujar puntos rojos en el RSI para esos fractales
+            if timestamps_match:
+                fig.add_trace(go.Scatter(
+                    x=timestamps_match,
+                    y=rsi_values,
+                    mode='markers',
+                    name=f'VALLE {fractal_type_label} RSI<OS',
+                    marker=dict(
+                        color='red',
+                        size=6,
+                        symbol='circle'
+                    ),
+                    hovertemplate=f'<b>VALLE {fractal_type_label} RSI<OS</b><br>Time: %{{x}}<br>RSI: %{{y:.2f}}<extra></extra>'
+                ), row=2, col=1)
+    """
+
     # Líneas de sobrecompra y sobreventa
     fig.add_hline(y=RSI_OVERBOUGHT, line=dict(color='lightblue', width=1, dash='solid'),
                   row=2, col=1, annotation_text=str(RSI_OVERBOUGHT),
@@ -262,7 +433,14 @@ def plot_range_chart(df, df_fractals_minor, df_fractals_major, start_date, end_d
                   row=2, col=1)
 
     # Configurar layout: añadir información de parámetros al título
-    # effective_resample ya fue determinado antes de calcular RSI y está disponible
+    # Determinar regla efectiva de resample según configuración
+    if isinstance(RSI_RESAMPLE, bool) and RSI_RESAMPLE is True:
+        effective_resample = RSI_RESAMPLE_TO_PERIOD
+    elif isinstance(RSI_RESAMPLE, str) and RSI_RESAMPLE:
+        effective_resample = RSI_RESAMPLE
+    else:
+        effective_resample = None
+
     title_params = (
         f"RSI_p={RSI_PERIOD}, smooth={RSI_SMOOTH_PERIOD}, resample={effective_resample}, "
         f"RSI_OB/OS={RSI_OVERBOUGHT}/{RSI_OVERSOLD}, MIN_IMP={MINIMUM_IMPULSE_FACTOR}%"
@@ -355,7 +533,7 @@ def plot_range_chart(df, df_fractals_minor, df_fractals_major, start_date, end_d
         'rsi_calculated': True
     }
 
-def plot_day_chart(dia, rsi_levels=None, fibo_levels=None):
+def plot_day_chart(dia, rsi_levels=None, fibo_levels=None, divergences=None):
     """
     Crea un gráfico con línea de precio y fractales ZigZag para el día especificado.
 
@@ -363,6 +541,7 @@ def plot_day_chart(dia, rsi_levels=None, fibo_levels=None):
         dia: Fecha en formato YYYY-MM-DD
         rsi_levels: dict con información de niveles RSI (opcional)
         fibo_levels: dict con información de niveles Fibonacci (opcional)
+        divergences: DataFrame con divergencias detectadas (opcional)
 
     Returns:
         dict con información del gráfico generado o None si hay error
@@ -514,6 +693,29 @@ def plot_day_chart(dia, rsi_levels=None, fibo_levels=None):
                 hovertemplate='<b>VALLE Major</b><br>Time: %{x}<br>Price: %{y:.2f}<extra></extra>'
             ), row=1, col=1)
 
+    # Dibujar triángulos de divergencia (señales de entrada)
+    if divergences is not None and not divergences.empty:
+        # Filtrar solo puntos de ENTRY (el último punto de cada divergencia)
+        df_entries = divergences[divergences['tag'].str.contains('ENTRY', na=False)].copy()
+
+        if not df_entries.empty:
+            print(f"[INFO] Dibujando {len(df_entries)} señales de divergencia en el gráfico")
+
+            fig.add_trace(go.Scatter(
+                x=df_entries['price_timestamp'],
+                y=df_entries['price'],
+                mode='markers',
+                name='Divergencia ENTRY',
+                marker=dict(
+                    color='lime',
+                    size=12,
+                    symbol='triangle-up',
+                    line=dict(color='darkgreen', width=2)
+                ),
+                hovertemplate='<b>DIVERGENCIA ENTRY</b><br>Tag: %{text}<br>Time: %{x}<br>Price: %{y:.2f}<extra></extra>',
+                text=df_entries['tag']
+            ), row=1, col=1)
+
     # Añadir niveles Fibonacci para TODOS los movimientos alcistas
     if fibo_levels is not None and 'upward_moves' in fibo_levels:
         upward_moves = fibo_levels['upward_moves']
@@ -562,6 +764,106 @@ def plot_day_chart(dia, rsi_levels=None, fibo_levels=None):
         line=dict(color='purple', width=1),
         showlegend=False
     ), row=2, col=1)
+
+    # Detectar fractales directamente en el RSI y marcarlos con puntos violeta
+    # Solo mostrar VALLES (fractal low) que están por debajo de RSI_OVERSOLD
+    df_rsi_fractals = detect_rsi_fractals(df, min_change_pct=MIN_CHANGE_PCT_RSI)
+    if not df_rsi_fractals.empty:
+        # Filtrar solo fractales VALLE por debajo de RSI_OVERSOLD
+        df_rsi_valles = df_rsi_fractals[
+            (df_rsi_fractals['type'] == 'VALLE') &
+            (df_rsi_fractals['rsi_value'] < RSI_OVERSOLD)
+        ]
+
+        # Dibujar VALLES del RSI en violeta (solo si están por debajo de OVERSOLD)
+        if not df_rsi_valles.empty:
+            fig.add_trace(go.Scatter(
+                x=df_rsi_valles['timestamp'],
+                y=df_rsi_valles['rsi_value'],
+                mode='markers',
+                name='RSI Valles <OS',
+                marker=dict(
+                    color='violet',
+                    size=8,
+                    symbol='circle'
+                ),
+                hovertemplate='<b>RSI VALLE <OS</b><br>Time: %{x}<br>RSI: %{y:.2f}<extra></extra>'
+            ), row=2, col=1)
+
+    # Dibujar triángulos de divergencia en el RSI (señales de entrada)
+    if divergences is not None and not divergences.empty:
+        # Filtrar solo puntos de ENTRY
+        df_entries = divergences[divergences['tag'].str.contains('ENTRY', na=False)].copy()
+
+        if not df_entries.empty:
+            # Para cada entrada, encontrar el valor del RSI en ese timestamp
+            rsi_entry_values = []
+            rsi_entry_timestamps = []
+
+            for idx, row in df_entries.iterrows():
+                entry_ts = pd.to_datetime(row['rsi_timestamp'])
+                rsi_val = row['rsi_value']
+
+                if pd.notna(rsi_val):
+                    rsi_entry_values.append(rsi_val)
+                    rsi_entry_timestamps.append(entry_ts)
+
+            # Dibujar triángulos en el RSI
+            if rsi_entry_timestamps:
+                fig.add_trace(go.Scatter(
+                    x=rsi_entry_timestamps,
+                    y=rsi_entry_values,
+                    mode='markers',
+                    name='Divergencia ENTRY RSI',
+                    marker=dict(
+                        color='lime',
+                        size=12,
+                        symbol='triangle-up',
+                        line=dict(color='darkgreen', width=2)
+                    ),
+                    hovertemplate='<b>DIVERGENCIA ENTRY RSI</b><br>Time: %{x}<br>RSI: %{y:.2f}<extra></extra>'
+                ), row=2, col=1)
+
+    # CÓDIGO COMENTADO - Marcar fractales VALLE de precio con RSI < RSI_OVERSOLD
+    # (No se usa actualmente, pero se mantiene por si se necesita en el futuro)
+    """
+    df_fractals_to_use = df_fractals_minor if MINOR_ZIG_ZAG_RSI else df_fractals_major
+    fractal_type_label = "MINOR" if MINOR_ZIG_ZAG_RSI else "MAJOR"
+
+    if df_fractals_to_use is not None and not df_fractals_to_use.empty:
+        df_valles_rsi = df_fractals_to_use[df_fractals_to_use['type'] == 'VALLE'].copy()
+
+        if not df_valles_rsi.empty:
+            # Para cada fractal VALLE, encontrar el valor del RSI en ese timestamp
+            rsi_values = []
+            timestamps_match = []
+
+            for idx, row in df_valles_rsi.iterrows():
+                fractal_ts = row['timestamp']
+                # Buscar el valor del RSI en el df principal para ese timestamp
+                df_match = df[df['timestamp'] == fractal_ts]
+                if not df_match.empty:
+                    rsi_val = df_match['rsi'].iloc[0]
+                    # Solo guardar si RSI < RSI_OVERSOLD
+                    if pd.notna(rsi_val) and rsi_val < RSI_OVERSOLD:
+                        rsi_values.append(rsi_val)
+                        timestamps_match.append(fractal_ts)
+
+            # Dibujar puntos rojos en el RSI para esos fractales
+            if timestamps_match:
+                fig.add_trace(go.Scatter(
+                    x=timestamps_match,
+                    y=rsi_values,
+                    mode='markers',
+                    name=f'VALLE {fractal_type_label} RSI<OS',
+                    marker=dict(
+                        color='red',
+                        size=6,
+                        symbol='circle'
+                    ),
+                    hovertemplate=f'<b>VALLE {fractal_type_label} RSI<OS</b><br>Time: %{{x}}<br>RSI: %{{y:.2f}}<extra></extra>'
+                ), row=2, col=1)
+    """
 
     # Líneas de sobrecompra y sobreventa
     fig.add_hline(y=RSI_OVERBOUGHT, line=dict(color='lightblue', width=1, dash='solid'),
