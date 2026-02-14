@@ -1,0 +1,61 @@
+//@version=5
+indicator("Simple Fibonacci Analyzer", overlay=true)
+
+// --- Inputs ---
+length = input.int(10, "Fractal Length (Bars)", minval=2, tooltip="How many bars to check left/right to confirm a top/bottom")
+showLines = input.bool(true, "Show Lines")
+showLabels = input.bool(true, "Show Prices")
+
+// --- Fractal Detection ---
+pico = ta.pivothigh(high, length, length)
+valle = ta.pivotlow(low, length, length)
+
+// --- State Variables ---
+var float lastVallePrice = na
+var int lastValleIndex = na
+
+// Arrays to store our drawing objects
+var line[] fibLines = array.new_line()
+var label[] fibLabels = array.new_label()
+
+// --- Logic ---
+
+if not na(valle)
+    lastVallePrice := valle
+    lastValleIndex := bar_index[length]
+
+if not na(pico)  and not na(lastValleIndex) and (bar_index[length] > lastValleIndex)
+    
+    swingHigh = pico
+    swingLow = lastVallePrice
+    diff = swingHigh - swingLow
+    
+    // Clear old lines
+    if array.size(fibLines) > 0
+        for l in fibLines
+            line.delete(l)
+        array.clear(fibLines)
+        
+    if array.size(fibLabels) > 0
+        for lb in fibLabels
+            label.delete(lb)
+        array.clear(fibLabels)
+
+    // Fibonacci Levels
+    levels = array.from(0.0, 0.236, 0.382, 0.5, 0.618, 1.0)
+    
+    for lvl in levels
+        price = swingHigh - (diff * lvl)
+        
+        lineColor = color.new(color.blue, 30)
+        lineStyle = line.style_solid
+        
+        // Draw Line
+        l = line.new(x1=lastValleIndex, y1=price, x2=bar_index, y2=price, color=lineColor, style=lineStyle)
+        array.push(fibLines, l)
+        
+        // Draw Label
+        if showLabels
+            txt = str.tostring(lvl * 100) + "% : " + str.tostring(price, format.mintick)
+            lb = label.new(x=bar_index, y=price, text=txt, color=color.new(color.white, 100), textcolor=lineColor, style=label.style_none, textalign=text.align_left)
+            array.push(fibLabels, lb)
